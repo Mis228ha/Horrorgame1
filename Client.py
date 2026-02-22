@@ -2310,14 +2310,21 @@ class App:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
-                elif event.type == pygame.KEYDOWN and event.key == pygame.K_F11:
-                    self.toggle_fullscreen()
-                elif event.type == pygame.VIDEORESIZE and not self.fullscreen:
+                    continue
+                if event.type == pygame.KEYDOWN:
+                    print(f"[DEBUG] key={event.key} K_RETURN={pygame.K_RETURN} screen={self._name}")
+                    if event.key == pygame.K_F11:
+                        self.toggle_fullscreen()
+                        continue
+                if event.type == pygame.VIDEORESIZE and not self.fullscreen:
                     self.screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
+                    continue
                 try:
                     self.current.handle_event(event)
                 except Exception as e:
+                    import traceback
                     print(f"[EVENT ERROR] {e}")
+                    traceback.print_exc()
 
             try:
                 self.current.update(dt)

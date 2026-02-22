@@ -805,33 +805,77 @@ class GameSession:
                     find_free_pos(self.walls, ServerPlayer.RADIUS, mz)
                 print(f"[SESSION] Monster: {monster_pid}")
 
-            key_zones = [
-                (1400, 300,  1900, 800),
-                (800,  1200, 1300, 1700),
-                (2400, 1400, 2900, 1900),
-            ]
+            # Ключи — полностью случайные позиции по всей карте
+            # Минимальное расстояние между ключами и от стартовых зон игроков
+            placed_keys = []
+            attempts = 0
             for i in range(NUM_KEYS):
-                zone = key_zones[i % len(key_zones)]
-                kx, ky = find_free_pos(self.walls, 20, zone)
-                self.keys.append(KeyObject(kx, ky, i))
+                while attempts < 5000:
+                    attempts += 1
+                    kx, ky = find_free_pos(self.walls, 20)
+                    # Не слишком близко к краям
+                    if kx < 120 or kx > MAP_W - 120 or ky < 120 or ky > MAP_H - 120:
+                        continue
+                    # Не слишком близко к другим ключам (минимум 400px)
+                    too_close = any(
+                        math.hypot(kx - pk[0], ky - pk[1]) < 400
+                        for pk in placed_keys
+                    )
+                    if too_close:
+                        continue
+                    # Не слишком близко к стартовым зонам выживших
+                    survivor_zones = [
+                        (100, 100, 700, 700),
+                        (100, 1800, 700, 2400),
+                        (2900, 100, 3500, 700),
+                        (2900, 2000, 3500, 2600),
+                    ]
+                    in_spawn = any(
+                        z[0] < kx < z[2] and z[1] < ky < z[3]
+                        for z in survivor_zones
+                    )
+                    if in_spawn:
+                        continue
+                    placed_keys.append((kx, ky))
+                    self.keys.append(KeyObject(kx, ky, i))
+                    print(f"[SESSION] Key {i} at ({int(kx)}, {int(ky)})")
+                    break
 
-            dx, dy = find_free_pos(self.walls, 25, (1500, 1300, 2000, 1700))
+            # Дверь — случайная позиция в центральной части карты
+            dx, dy = find_free_pos(self.walls, 25,
+                                   (MAP_W//4, MAP_H//4, MAP_W*3//4, MAP_H*3//4))
+            # Не слишком близко к ключам
+            for _ in range(200):
+                too_close = any(
+                    math.hypot(dx - pk[0], dy - pk[1]) < 300
+                    for pk in placed_keys
+                )
+                if not too_close:
+                    break
+                dx, dy = find_free_pos(self.walls, 25,
+                                       (MAP_W//4, MAP_H//4, MAP_W*3//4, MAP_H*3//4))
             self.doors.append(DoorObject(dx, dy, 0, keys_needed=NUM_KEYS))
+            print(f"[SESSION] Door at ({int(dx)}, {int(dy)})")
 
-            trap_zones = [
-                (500,  500,  1000, 900),
-                (1000, 1100, 1500, 1500),
-                (1600, 500,  2100, 900),
-                (1600, 1600, 2200, 2100),
-                (300,  1500, 800,  2100),
-                (2200, 700,  2700, 1200),
-                (2600, 1300, 3100, 1800),
-                (800,  2100, 1300, 2600),
-            ]
+            # Ловушки — случайные позиции по всей карте
+            placed_traps = []
+            attempts = 0
             for i in range(NUM_TRAPS):
-                zone = trap_zones[i % len(trap_zones)]
-                tx, ty = find_free_pos(self.walls, 20, zone)
-                self.traps.append(TrapObject(tx, ty, i))
+                while attempts < 5000:
+                    attempts += 1
+                    tx, ty = find_free_pos(self.walls, 20)
+                    if tx < 80 or tx > MAP_W - 80 or ty < 80 or ty > MAP_H - 80:
+                        continue
+                    # Не слишком близко к другим ловушкам
+                    too_close = any(
+                        math.hypot(tx - pt[0], ty - pt[1]) < 200
+                        for pt in placed_traps
+                    )
+                    if too_close:
+                        continue
+                    placed_traps.append((tx, ty))
+                    self.traps.append(TrapObject(tx, ty, i))
+                    break
 
             self._last_tick = time.time()
 
