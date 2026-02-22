@@ -1021,6 +1021,9 @@ class InputField:
         elif event.type == pygame.KEYDOWN and self.active:
             if event.key == pygame.K_BACKSPACE:
                 self.text = self.text[:-1]
+            elif event.key == pygame.K_RETURN or event.key == 1073741912:
+                # Enter не поглощаем — MenuScreen сам обработает
+                pass
             elif len(self.text) < 40 and event.unicode.isprintable():
                 self.text += event.unicode
 
