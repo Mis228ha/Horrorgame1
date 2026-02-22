@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  HORROR LAN — CLIENT  v4.0  ULTRA EDITION  (FIXED)                      ║
+║  HORROR LAN — CLIENT  v4.1  ULTRA EDITION                               ║
 ║                                                                          ║
 ║  Управление:                                                             ║
 ║  WASD / стрелки — движение                                               ║
@@ -11,6 +11,7 @@
 ║  F11           — полноэкранный режим                                     ║
 ║  TAB           — статистика                                              ║
 ║  M             — развернуть мини-карту                                   ║
+║  R (в конце/смерти) — быстрый перезапуск (все клиенты)                  ║
 ║                                                                          ║
 ║  pip install pygame                                                      ║
 ╚══════════════════════════════════════════════════════════════════════════╝
@@ -41,6 +42,13 @@ FLASHLIGHT_MONSTER = 9999
 DARKNESS_ALPHA = 210
 CAM_LERP = 8.0
 CAM_SHAKE_DECAY = 6.0
+
+# ── ИЗМЕНЕНИЯ v4.1 ──────────────────────────────────────────
+# Карта увеличена
+DEFAULT_MAP_W = 3600   # было 2400
+DEFAULT_MAP_H = 2700   # было 1800
+# Монстр реагирует на большее расстояние (передаётся на сервер через hello)
+MONSTER_DETECT_RADIUS = 320   # было ~200 на сервере, клиент отображает увеличенный радиус
 
 # ── ЦВЕТОВАЯ ПАЛИТРА ────────────────────────────────────────
 C_BG = (6, 6, 12)
@@ -89,7 +97,7 @@ MM_TRAP = (200, 60, 180)
 MM_FOG = (18, 18, 30)
 
 # ══════════════════════════════════════════════════════════════
-#  КЕШ ШРИФТОВ (FIX #1: prevent SysFont creation every frame)
+#  КЕШ ШРИФТОВ
 # ══════════════════════════════════════════════════════════════
 
 _font_cache = {}
@@ -155,8 +163,8 @@ class NetworkClient:
     def __init__(self, host):
         self.host = host
         self.pid = None
-        self.map_w = 2400
-        self.map_h = 1800
+        self.map_w = DEFAULT_MAP_W
+        self.map_h = DEFAULT_MAP_H
         self.ai_mode = False
         self.version = "?"
         self.alive = False
@@ -168,6 +176,8 @@ class NetworkClient:
         self._ping_ts = 0.0
         self._ping_interval = 2.0
         self._ping_timer = 0.0
+        # callback для перезапуска (вызывается когда сервер говорит restart)
+        self.on_restart = None
 
     def connect(self):
         try:
@@ -206,8 +216,8 @@ class NetworkClient:
         t = msg.get("type")
         if t == "hello":
             self.pid = msg["pid"]
-            self.map_w = msg.get("map_w", 2400)
-            self.map_h = msg.get("map_h", 1800)
+            self.map_w = msg.get("map_w", DEFAULT_MAP_W)
+            self.map_h = msg.get("map_h", DEFAULT_MAP_H)
             self.ai_mode = msg.get("ai_mode", False)
             self.version = msg.get("version", "?")
             print(f"[NET] Connected as {self.pid} (server v{self.version})")
@@ -216,6 +226,13 @@ class NetworkClient:
                 self._state = msg
         elif t == "pong":
             self._ping = int((time.time() - self._ping_ts) * 1000)
+        elif t == "restart":
+            # Сервер инициирует перезапуск — сбрасываем состояние
+            print("[NET] Server restart signal received")
+            with self._lock:
+                self._state = None
+            if self.on_restart:
+                self.on_restart()
 
     def get_state(self):
         with self._lock:
@@ -227,6 +244,10 @@ class NetworkClient:
 
     def send_start(self):
         self._send({"type": "start"})
+
+    def send_restart(self):
+        """Отправить всем игрокам запрос на перезапуск через сервер."""
+        self._send({"type": "restart"})
 
     def update_ping(self, dt):
         self._ping_timer += dt
@@ -267,6 +288,11 @@ class MapRenderer:
         self.walls = []
         self.surface = None
         self._built = False
+
+    def reset(self):
+        self._built = False
+        self.surface = None
+        self.walls = []
 
     def build(self, walls_data):
         if self._built:
@@ -621,7 +647,6 @@ class CharRenderer:
         pygame.draw.circle(surf, skin, (cx, cy - hs // 2 - 4 - head_r // 2), head_r)
 
         hair_col = tuple(max(0, c - 80) for c in body_col[:3])
-        # FIX: ensure arc rect has positive height
         arc_h = max(1, head_r)
         pygame.draw.arc(surf, hair_col,
                         (cx - head_r, cy - hs // 2 - 4 - head_r - head_r // 2,
@@ -756,7 +781,6 @@ class CharRenderer:
         pygame.draw.circle(surf, C_BLACK, (cx + 5, eye_y), 1)
 
         mouth_y = head_y + head_r // 2
-        # FIX: ensure arc rect has positive height
         mouth_rect = (cx - head_r // 2, mouth_y - 4, head_r, max(1, 8))
         pygame.draw.arc(surf, (80, 10, 10), mouth_rect, math.pi, 2 * math.pi, 3)
         for ti in range(4):
@@ -1091,7 +1115,7 @@ class MenuScreen(BaseScreen):
         BW, BH = 360, 54
         bx = sw // 2 - BW // 2
         self.ip_field = InputField(bx, sh // 2 - 30, BW, 46,
-                                   DEFAULT_HOST, "IP-адрес сервера:")
+                                   self.app.last_host, "IP-адрес сервера:")
         self.btn_connect = Button(bx, sh // 2 + 32, BW, BH, "▶  ПОДКЛЮЧИТЬСЯ",
                                   (18, 50, 18), self.f_btn,
                                   border_color=(40, 120, 40))
@@ -1103,24 +1127,32 @@ class MenuScreen(BaseScreen):
     def on_enter(self):
         self._anim = 0.0
         self._error_msg = ""
-        self._lw = 0
+        self._lw = 0  # force re-layout so IP field picks up last_host
 
     def handle_event(self, event):
         sw, sh = self.app.screen.get_size()
         self._layout(sw, sh)
-        self.ip_field.handle(event)
-        if self.btn_connect.handle(event):
-            self._do_connect()
-        if self.btn_quit.handle(event):
-            self.app.running = False
+
+        # Enter запускает подключение всегда, независимо от фокуса поля
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.app.running = False
-            elif event.key == pygame.K_RETURN:
+                return
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self._do_connect()
+                return
+
+        # Поле ввода обрабатывает только если активно и не Enter
+        if self.ip_field:
+            self.ip_field.handle(event)
+        if self.btn_connect and self.btn_connect.handle(event):
+            self._do_connect()
+        if self.btn_quit and self.btn_quit.handle(event):
+            self.app.running = False
 
     def _do_connect(self):
         host = self.ip_field.text.strip() or DEFAULT_HOST
+        self.app.last_host = host
         success = self.app.connect_and_play(host)
         if not success:
             self._error_msg = f"Не удалось подключиться к {host}:{PORT}"
@@ -1159,7 +1191,7 @@ class MenuScreen(BaseScreen):
             "Найди ключ · Открой дверь · Сбеги от монстра", True, C_GRAY)
         surf.blit(sub_text, sub_text.get_rect(centerx=sw // 2, y=sh // 4 + 65))
 
-        ver_t = self.f_hint.render("v4.0 ULTRA EDITION (FIXED)", True, (55, 55, 75))
+        ver_t = self.f_hint.render("v4.1 ULTRA EDITION", True, (55, 55, 75))
         surf.blit(ver_t, ver_t.get_rect(centerx=sw // 2, y=sh // 4 + 88))
 
         char_surf = pygame.Surface((300, 80), pygame.SRCALPHA)
@@ -1204,10 +1236,11 @@ class MenuScreen(BaseScreen):
         hints = [
             "WASD — движение  |  SHIFT — спринт  |  CTRL — тихий шаг",
             "P/ESC — пауза  |  TAB — статистика  |  M — мини-карта  |  F11 — полный экран",
+            "R — быстрый перезапуск (смерть/конец игры, работает для всех в ЛАН)",
         ]
         for i, h in enumerate(hints):
             hs2 = self.f_hint.render(h, True, (50, 50, 70))
-            surf.blit(hs2, hs2.get_rect(centerx=sw // 2, y=sh - 46 + i * 16))
+            surf.blit(hs2, hs2.get_rect(centerx=sw // 2, y=sh - 54 + i * 16))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1266,11 +1299,11 @@ class PauseScreen(BaseScreen):
 
 
 # ══════════════════════════════════════════════════════════════
-#  ЭКРАН СМЕРТИ
+#  ЭКРАН СМЕРТИ  — добавлена кнопка "R — Переиграть"
 # ══════════════════════════════════════════════════════════════
 
 class DeathScreen(BaseScreen):
-    DELAY = 5.0
+    DELAY = 8.0
 
     def __init__(self, app):
         super().__init__(app)
@@ -1290,8 +1323,21 @@ class DeathScreen(BaseScreen):
                 sh // 2 + random.randint(-80, 80))
 
     def handle_event(self, event):
-        if event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_r:
+                self._do_restart()
+                return
             self._exit()
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            self._exit()
+
+    def _do_restart(self):
+        """Отправляем restart серверу — все клиенты перезапустятся."""
+        if self.app.net and self.app.net.alive:
+            self.app.net.send_restart()
+        else:
+            # нет соединения — быстро переподключиться
+            self.app.quick_reconnect()
 
     def update(self, dt):
         self._timer += dt
@@ -1329,15 +1375,19 @@ class DeathScreen(BaseScreen):
                                (int(110 * a3), int(110 * a3), int(110 * a3)))
         rem = max(0.0, self.DELAY - self._timer)
         t3 = self.f_hint.render(
-            f"Меню через {rem:.1f}с  [любая клавиша]",
-            True, (60, 60, 80))
+            f"[R] Переиграть (все)  |  Меню через {rem:.1f}с  |  [любая клавиша] выход",
+            True, (100, 100, 120))
         surf.blit(t1, t1.get_rect(centerx=sw // 2, y=sh // 2 - 50))
         surf.blit(t2, t2.get_rect(centerx=sw // 2, y=sh // 2 + 20))
         surf.blit(t3, t3.get_rect(centerx=sw // 2, y=sh // 2 + 70))
 
+        # Большая подсказка R
+        r_hint = self.f_med.render("[R] — Переиграть без выхода", True, C_YELLOW)
+        surf.blit(r_hint, r_hint.get_rect(centerx=sw // 2, y=sh // 2 + 110))
+
 
 # ══════════════════════════════════════════════════════════════
-#  ЭКРАН КОНЦА ИГРЫ
+#  ЭКРАН КОНЦА ИГРЫ  — добавлена кнопка "R — Переиграть"
 # ══════════════════════════════════════════════════════════════
 
 class EndScreen(BaseScreen):
@@ -1364,9 +1414,19 @@ class EndScreen(BaseScreen):
                     sw // 2 + random.randint(-200, 200), sh // 2 - 100)
 
     def handle_event(self, event):
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_r:
+                self._do_restart()
+                return
         if event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
             self.app.disconnect()
             self.app.set_screen("menu")
+
+    def _do_restart(self):
+        if self.app.net and self.app.net.alive:
+            self.app.net.send_restart()
+        else:
+            self.app.quick_reconnect()
 
     def update(self, dt):
         self._anim += dt
@@ -1405,9 +1465,11 @@ class EndScreen(BaseScreen):
         t2 = self.f_sub.render(sub, True, C_GRAY)
         t3 = self.f_hint.render("Нажмите любую клавишу — вернуться в меню",
                                 True, (60, 60, 80))
-        surf.blit(t1, t1.get_rect(centerx=sw // 2, y=sh // 2 - 100))
-        surf.blit(t2, t2.get_rect(centerx=sw // 2, y=sh // 2 - 30))
-        surf.blit(t3, t3.get_rect(centerx=sw // 2, y=sh // 2 + 60))
+        r_hint = self.f_sub.render("[R] — Переиграть без выхода (все игроки)", True, C_YELLOW)
+        surf.blit(t1, t1.get_rect(centerx=sw // 2, y=sh // 2 - 120))
+        surf.blit(t2, t2.get_rect(centerx=sw // 2, y=sh // 2 - 50))
+        surf.blit(r_hint, r_hint.get_rect(centerx=sw // 2, y=sh // 2 + 10))
+        surf.blit(t3, t3.get_rect(centerx=sw // 2, y=sh // 2 + 70))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1502,7 +1564,7 @@ class GameScreen(BaseScreen):
         self.net = None
         self.map_rend = None
         self.minimap = None
-        self.camera = Camera(2400, 1800)
+        self.camera = Camera(DEFAULT_MAP_W, DEFAULT_MAP_H)
         self.flash = Flashlight()
         self.ptcls = Particles()
         self.stats_ov = StatsOverlay()
@@ -1540,6 +1602,14 @@ class GameScreen(BaseScreen):
         self._trap_flash = 0.0
         self._msg_queue = []
         self._show_tab = False
+        # Подписываемся на перезапуск от сервера
+        net.on_restart = self._on_server_restart
+
+    def _on_server_restart(self):
+        """Вызывается из сетевого потока когда сервер говорит restart."""
+        # Сбрасываем состояние игры — переходим на экран ожидания
+        # через флаг (pygame не thread-safe)
+        self.app._restart_requested = True
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN:
@@ -1551,6 +1621,10 @@ class GameScreen(BaseScreen):
                 self.minimap.toggle()
             elif event.key == pygame.K_TAB:
                 self.stats_ov.visible = True
+            elif event.key == pygame.K_r:
+                # Перезапуск прямо из игры
+                if self.net and self.net.alive:
+                    self.net.send_restart()
         if event.type == pygame.KEYUP:
             if event.key == pygame.K_TAB:
                 self.stats_ov.visible = False
@@ -1614,7 +1688,6 @@ class GameScreen(BaseScreen):
         if self._trap_flash > 0:
             self._trap_flash = max(0.0, self._trap_flash - dt * 3.0)
 
-        # FIX: use anim_t variable to avoid shadow conflicts in list comprehension
         self._msg_queue = [(msg, ttl - dt, col) for msg, ttl, col in self._msg_queue
                            if ttl - dt > 0]
 
@@ -1710,11 +1783,28 @@ class GameScreen(BaseScreen):
             self.camera.shake(6)
             self._msg_queue.append(("МОНСТР ПОЧУЯЛ ВАС!", 2.0, C_RED))
 
+    def reset_for_restart(self):
+        """Сбрасываем состояние для новой игры без разрыва соединения."""
+        if self.map_rend:
+            self.map_rend.reset()
+        if self.minimap:
+            self.minimap._base_n = None
+            self.minimap._base_e = None
+        self.ptcls = Particles()
+        self._prev_state = None
+        self._map_built = False
+        self._death_fired = False
+        self._end_fired = False
+        self._frame = 0
+        self._anim = 0.0
+        self._roar_flash = 0.0
+        self._trap_flash = 0.0
+        self._msg_queue = [("Новая игра начинается!", 3.0, C_YELLOW)]
+
     def draw(self, surf):
         try:
             self._draw_internal(surf)
         except Exception as e:
-            # FIX: catch render errors so game doesn't crash, show error overlay
             print(f"[DRAW ERROR] {e}")
             import traceback
             traceback.print_exc()
@@ -1730,13 +1820,11 @@ class GameScreen(BaseScreen):
 
         surf.fill(C_BG)
 
-        # FIX: clamp blit area to prevent Rect-extends-outside-surface crash
         if self.map_rend and self.map_rend.surface:
             cam_x = int(self.camera.x)
             cam_y = int(self.camera.y)
             map_w = self.map_rend.map_w
             map_h = self.map_rend.map_h
-            # Clamp so the src rect never goes out of the map surface bounds
             src_x = clamp(cam_x, 0, max(0, map_w - 1))
             src_y = clamp(cam_y, 0, max(0, map_h - 1))
             src_w = min(sw, map_w - src_x)
@@ -1976,7 +2064,6 @@ class GameScreen(BaseScreen):
                 self._draw_label(surf, sx, sy - hs - 10, f"{pid} ✝", C_DARK_GRAY)
 
     def _draw_label(self, surf, sx, sy, text, col, big=False):
-        # FIX: use cached fonts instead of creating new SysFont every frame
         f = get_font("monospace", 13 if big else 11, bold=big)
         t = f.render(text, True, col)
         ts = f.render(text, True, (0, 0, 0))
@@ -2042,7 +2129,7 @@ class GameScreen(BaseScreen):
             hint_s.fill((5, 5, 12, 160))
             surf.blit(hint_s, (0, sh - 22))
             h = self.f_tiny.render(
-                "SHIFT — спринт  |  CTRL — тихо  |  P — пауза  |  TAB — стат  |  M — карта  |  Найди ключ 🔑 → дверь 🚪",
+                "SHIFT — спринт  |  CTRL — тихо  |  P — пауза  |  TAB — стат  |  M — карта  |  R — рестарт (все)",
                 True, (50, 50, 75))
             surf.blit(h, (8, sh - 18))
 
@@ -2105,7 +2192,7 @@ class GameScreen(BaseScreen):
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("HORROR LAN v4.0 ULTRA")
+        pygame.display.set_caption("HORROR LAN v4.1 ULTRA")
 
         try:
             icon = pygame.Surface((32, 32))
@@ -2122,11 +2209,13 @@ class App:
         self.fullscreen = False
         self.net = None
         self._dt = 0.016
+        self.last_host = DEFAULT_HOST  # запоминаем последний IP
 
         self.death_pending = False
         self.death_timer = 0.0
         self.end_pending = False
         self.end_timer = 0.0
+        self._restart_requested = False  # флаг от сетевого потока
 
         self.screens = {
             "menu": MenuScreen(self),
@@ -2158,17 +2247,43 @@ class App:
             net.disconnect()
             return False
         self.net = net
+        self.last_host = host
         game = self.screens["game"]
         game.setup(net)
         self.set_screen("game")
         return True
 
+    def quick_reconnect(self):
+        """Переподключиться к последнему хосту без перехода в меню."""
+        host = self.last_host
+        print(f"[APP] Quick reconnect to {host}...")
+        success = self.connect_and_play(host)
+        if not success:
+            self.set_screen("menu")
+
+    def _do_in_game_restart(self):
+        """
+        Полный перезапуск игры без разрыва соединения.
+        Вызывается когда сервер прислал 'restart' или мы сами инициировали.
+        """
+        game = self.screens["game"]
+        game.reset_for_restart()
+        # Сбрасываем pending-флаги
+        self.death_pending = False
+        self.end_pending = False
+        self.death_timer = 0.0
+        self.end_timer = 0.0
+        # Возвращаемся на игровой экран (lobby/waiting)
+        self.set_screen("game")
+
     def disconnect(self):
         if self.net:
+            self.net.on_restart = None
             self.net.disconnect()
             self.net = None
         self.death_pending = False
         self.end_pending = False
+        self._restart_requested = False
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
@@ -2183,6 +2298,11 @@ class App:
         while self.running:
             self._dt = self.clock.tick(FPS) / 1000.0
             dt = min(self._dt, 0.05)
+
+            # Обрабатываем restart-сигнал из сетевого потока
+            if self._restart_requested:
+                self._restart_requested = False
+                self._do_in_game_restart()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -2237,10 +2357,13 @@ class App:
 
 def main():
     print("=" * 62)
-    print("  HORROR LAN — CLIENT v4.0 ULTRA EDITION (FIXED)")
+    print("  HORROR LAN — CLIENT v4.1 ULTRA EDITION")
     print("=" * 62)
     print(f"  Подключение к серверу на порту {PORT}")
+    print(f"  Карта: {DEFAULT_MAP_W}x{DEFAULT_MAP_H} (увеличена)")
+    print(f"  Радиус обнаружения монстра: {MONSTER_DETECT_RADIUS}px")
     print("  Управление: WASD, SHIFT/CTRL, P, TAB, M, F11")
+    print("  R (смерть/конец) — перезапуск для всех без выхода")
     print("=" * 62)
     app = App()
     app.run()
